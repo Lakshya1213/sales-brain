@@ -1,0 +1,6 @@
+groq
+python-dotenv
+psycopg2-binary
+neo4j
+pandas
+python-docx
