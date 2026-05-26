@@ -10,55 +10,118 @@ driver = GraphDatabase.driver(
 )
 
 
-def count_signals_by_category():
+def run_query(title, query):
+    print("\n" + "=" * 60)
+    print(title)
+    print("=" * 60)
+
+    with driver.session() as session:
+        result = session.run(query)
+
+        found = False
+        for record in result:
+            found = True
+            print(dict(record))
+
+        if not found:
+            print("No data found")
+
+
+def count_temporal_signals_by_category():
     query = """
-    MATCH (sig:Signal)
-    RETURN sig.category AS category, count(sig) AS count
+    MATCH (t:TemporalSignal)
+    RETURN t.category AS category, count(t) AS count
     ORDER BY count DESC
     """
-
-    with driver.session() as session:
-        result = session.run(query)
-
-        print("\nNeo4j Signals by category:\n")
-        for record in result:
-            print(record["category"], record["count"])
+    run_query("Bi-temporal Signals by Category", query)
 
 
-def speaker_signal_paths():
+def show_temporal_fields():
     query = """
-    MATCH (s:Speaker)-[:SAID]->(sig:Signal)-[:FROM_CONVERSATION]->(c:Conversation)
-    RETURN s.name AS speaker, sig.category AS category, sig.source_text AS text, c.id AS conversation_id
+    MATCH (t:TemporalSignal)
+    RETURN
+        t.category AS category,
+        t.source_text AS text,
+        t.valid_from AS valid_from,
+        t.valid_to AS valid_to,
+        t.recorded_at AS recorded_at,
+        t.invalidated_at AS invalidated_at,
+        t.status AS status
     LIMIT 20
     """
-
-    with driver.session() as session:
-        result = session.run(query)
-
-        print("\nSpeaker → Signal → Conversation paths:\n")
-        for record in result:
-            print(record["speaker"], "->", record["category"], "->", record["conversation_id"])
-            print(record["text"])
-            print()
+    run_query("Temporal Fields", query)
 
 
-def get_questions_from_graph():
+def active_temporal_signals():
     query = """
-    MATCH (s:Speaker)-[:SAID]->(sig:Signal)
-    WHERE sig.category = 'question'
-    RETURN s.name AS speaker, sig.source_text AS question
+    MATCH (t:TemporalSignal)
+    WHERE t.status = 'active'
+    RETURN
+        t.category AS category,
+        t.source_text AS text,
+        t.valid_from AS valid_from,
+        t.recorded_at AS recorded_at
+    LIMIT 30
     """
+    run_query("Currently Active Temporal Signals", query)
 
-    with driver.session() as session:
-        result = session.run(query)
 
-        print("\nQuestions from Neo4j:\n")
-        for record in result:
-            print(record["speaker"], ":", record["question"])
+def temporal_objections():
+    query = """
+    MATCH (t:TemporalSignal)
+    WHERE t.category = 'objection'
+    RETURN
+        t.source_text AS objection,
+        t.valid_from AS valid_from,
+        t.status AS status
+    """
+    run_query("Temporal Objections", query)
+
+
+def temporal_risk_cues():
+    query = """
+    MATCH (t:TemporalSignal)
+    WHERE t.category = 'risk_cue'
+    RETURN
+        t.source_text AS risk_text,
+        t.valid_from AS valid_from,
+        t.status AS status
+    """
+    run_query("Temporal Risk Cues", query)
+
+
+def invalidated_signals():
+    query = """
+    MATCH (t:TemporalSignal)
+    WHERE t.invalidated_at IS NOT NULL
+    RETURN
+        t.category AS category,
+        t.source_text AS text,
+        t.invalidated_at AS invalidated_at
+    """
+    run_query("Invalidated Signals", query)
+
+
+def closed_old_facts():
+    query = """
+    MATCH (t:TemporalSignal)
+    WHERE t.valid_to IS NOT NULL
+    RETURN
+        t.category AS category,
+        t.source_text AS text,
+        t.valid_from AS valid_from,
+        t.valid_to AS valid_to
+    """
+    run_query("Closed Old Facts / World Changed", query)
 
 
 if __name__ == "__main__":
-    count_signals_by_category()
-    speaker_signal_paths()
-    get_questions_from_graph()
+    count_temporal_signals_by_category()
+    show_temporal_fields()
+    active_temporal_signals()
+    temporal_objections()
+    temporal_risk_cues()
+    invalidated_signals()
+    closed_old_facts()
+
     driver.close()

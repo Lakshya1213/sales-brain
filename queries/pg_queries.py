@@ -15,10 +15,30 @@ def get_pg_connection():
     )
 
 
-def count_signals_by_category():
+def run_query(title, query):
 
     conn = get_pg_connection()
     cur = conn.cursor()
+
+    print(f"\n{'=' * 50}")
+    print(title)
+    print(f"{'=' * 50}\n")
+
+    cur.execute(query)
+
+    rows = cur.fetchall()
+
+    if not rows:
+        print("No data found")
+
+    for row in rows:
+        print(row)
+
+    cur.close()
+    conn.close()
+
+
+def count_signals_by_category():
 
     query = """
     SELECT category, COUNT(*)
@@ -27,71 +47,139 @@ def count_signals_by_category():
     ORDER BY COUNT(*) DESC;
     """
 
-    cur.execute(query)
+    run_query("Signals by Category", query)
 
-    rows = cur.fetchall()
 
-    print("\nSignals by category:\n")
+def get_objections():
 
-    for row in rows:
-        print(row)
+    query = """
+    SELECT conversation_id, speaker, source_text
+    FROM signals
+    WHERE category = 'objection';
+    """
 
-    cur.close()
-    conn.close()
+    run_query("Customer Objections", query)
+
+
+def get_pain_points():
+
+    query = """
+    SELECT conversation_id, source_text
+    FROM signals
+    WHERE category = 'pain_point';
+    """
+
+    run_query("Pain Points", query)
 
 
 def get_commitments():
 
-    conn = get_pg_connection()
-    cur = conn.cursor()
-
     query = """
-    SELECT speaker, source_text
+    SELECT conversation_id, speaker, source_text
     FROM signals
     WHERE category = 'commitment';
     """
 
-    cur.execute(query)
-
-    rows = cur.fetchall()
-
-    print("\nCommitments:\n")
-
-    for row in rows:
-        print(row)
-
-    cur.close()
-    conn.close()
+    run_query("Commitments", query)
 
 
-def get_questions():
-
-    conn = get_pg_connection()
-    cur = conn.cursor()
+def get_next_steps():
 
     query = """
-    SELECT speaker, source_text
+    SELECT conversation_id, speaker, source_text
     FROM signals
-    WHERE category = 'question';
+    WHERE category = 'next_step';
     """
 
-    cur.execute(query)
-
-    rows = cur.fetchall()
-
-    print("\nQuestions:\n")
-
-    for row in rows:
-        print(row)
-
-    cur.close()
-    conn.close()
+    run_query("Next Steps", query)
 
 
+def get_risk_cues():
+
+    query = """
+    SELECT conversation_id, source_text
+    FROM signals
+    WHERE category = 'risk_cue';
+    """
+
+    run_query("Risk Cues", query)
+
+
+def get_intent_signals():
+
+    query = """
+    SELECT conversation_id, source_text
+    FROM signals
+    WHERE category = 'intent_signal';
+    """
+
+    run_query("Intent Signals", query)
+
+
+def get_budget_pricing():
+
+    query = """
+    SELECT conversation_id, source_text
+    FROM signals
+    WHERE category = 'budget_pricing';
+    """
+
+    run_query("Budget & Pricing Signals", query)
+
+
+def get_product_interest():
+
+    query = """
+    SELECT conversation_id, source_text
+    FROM signals
+    WHERE category = 'product_intent';
+    """
+
+    run_query("Product Intent", query)
+
+def count_signals_by_conversation():
+
+    query = """
+    SELECT conversation_id, COUNT(*)
+    FROM signals
+    GROUP BY conversation_id
+    ORDER BY COUNT(*) DESC;
+    """
+
+    run_query("Signals by Conversation", query)
+
+
+def category_count_per_conversation():
+
+    query = """
+    SELECT conversation_id, category, COUNT(*)
+    FROM signals
+    GROUP BY conversation_id, category
+    ORDER BY conversation_id, COUNT(*) DESC;
+    """
+
+    run_query("Category Count per Conversation", query)
+    
 if __name__ == "__main__":
+
+    count_signals_by_conversation()
+
+    category_count_per_conversation()
 
     count_signals_by_category()
 
+    get_objections()
+
+    get_pain_points()
+
     get_commitments()
 
-    get_questions()
+    get_next_steps()
+
+    get_risk_cues()
+
+    get_intent_signals()
+
+    get_budget_pricing()
+
+    get_product_interest()
