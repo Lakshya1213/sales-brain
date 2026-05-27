@@ -7,6 +7,9 @@ from langchain_core.prompts import PromptTemplate
 
 load_dotenv()
 
+# =========================
+# Neo4j Connection
+# =========================
 
 graph = Neo4jGraph(
     url=os.getenv("NEO4J_URI"),
@@ -14,12 +17,18 @@ graph = Neo4jGraph(
     password=os.getenv("NEO4J_PASSWORD")
 )
 
+# =========================
+# LLM
+# =========================
 
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0
 )
 
+# =========================
+# Cypher Prompt
+# =========================
 
 CYPHER_GENERATION_TEMPLATE = """
 You are an expert Neo4j Cypher query generator.
@@ -42,120 +51,61 @@ TemporalSignal properties:
 - valid_to
 - invalidated_at
 
-Available categories:
-- budget_pricing
-- product_intent
-- process_step
-- pain_point
-- objection
-- risk_cue
-- intent_signal
-- commitment
-- people
-- locations
-- products
+Conversation properties:
+- id
 
-Important category mapping:
-- fee, scholarship, budget, pricing, amount, tuition = budget_pricing
-- program, BBA, course, degree, Tech and Business Management = product_intent
-- admission process, test, interview, simulation, video essay = process_step
-- concern, problem, doubt, worried = pain_point
-- follow up, share, send, call, brochure, application link = commitment
-- person, name, founder, Garima, Pratham Mittal = people
-- place, location, Gurgaon, Hyderabad, Bangalore = locations
+Speaker properties:
+- name
 
 Rules:
 - Use only MATCH queries.
 - Never create, delete, update, or modify data.
 - Always query TemporalSignal as t.
-- Always use AS aliases in RETURN.
-- Do not invent categories like fee, scholarship, or program.
-- For fee questions, use category budget_pricing OR text search.
-- For program questions, use category product_intent OR text search.
-- For admission questions, use category process_step OR text search.
-- For active/current facts, use t.status = 'active'.
-- For invalidated facts, use t.invalidated_at IS NOT NULL.
-- For closed old facts, use t.valid_to IS NOT NULL.
+- Always use this pattern:
+
+MATCH (s:Speaker)-[:SAID_TEMPORAL]->(t:TemporalSignal)-[:FROM_CONVERSATION_TEMPORAL]->(c:Conversation)
+
 - Use toLower(t.source_text) CONTAINS 'keyword' for text search.
-- Return only useful fields with aliases:
-  t.category AS category,
-  t.source_text AS text,
-  t.confidence AS confidence,
-  t.valid_from AS valid_from,
-  t.recorded_at AS recorded_at,
-  t.status AS status
-- Use LIMIT 10 unless user asks for more.
-- Do not count unless user asks how many.
+- For broad reasoning questions, use OR between related keywords.
+- Do NOT force all keywords using AND unless user asks strict filtering.
+- Different information may exist in different TemporalSignal rows.
+- For current/active facts, use:
+  t.status = 'active'
 
-Examples:
+- For invalidated/outdated facts, use:
+  t.invalidated_at IS NOT NULL
+  OR t.status <> 'active'
 
-Question:
-What active fee or scholarship related facts are present?
+- For facts that had an old validity period, use:
+  t.valid_to IS NOT NULL
 
-Cypher:
-MATCH (s:Speaker)-[:SAID_TEMPORAL]->(t:TemporalSignal)-[:FROM_CONVERSATION_TEMPORAL]->(c:Conversation)
-WHERE t.status = 'active'
-AND (
-    t.category = 'budget_pricing'
-    OR toLower(t.source_text) CONTAINS 'fee'
-    OR toLower(t.source_text) CONTAINS 'scholarship'
-    OR toLower(t.source_text) CONTAINS 'pricing'
-    OR toLower(t.source_text) CONTAINS 'budget'
-    OR toLower(t.source_text) CONTAINS 'tuition'
-)
-RETURN 
+- For recorded-time questions, use:
+  t.recorded_at
+
+- For valid-time questions, use:
+  t.valid_from and t.valid_to
+
+- Never use COUNT unless user asks "how many", "count", or "total".
+- Use LIMIT 20 unless user asks for all records.
+
+Always return:
     t.category AS category,
     t.source_text AS text,
+    s.name AS speaker,
+    c.id AS conversation_id,
     t.confidence AS confidence,
     t.valid_from AS valid_from,
+    t.valid_to AS valid_to,
     t.recorded_at AS recorded_at,
+    t.invalidated_at AS invalidated_at,
     t.status AS status
-LIMIT 10
 
-Question:
-What active program related facts are present?
-
-Cypher:
-MATCH (s:Speaker)-[:SAID_TEMPORAL]->(t:TemporalSignal)-[:FROM_CONVERSATION_TEMPORAL]->(c:Conversation)
-WHERE t.status = 'active'
-AND (
-    t.category = 'product_intent'
-    OR toLower(t.source_text) CONTAINS 'program'
-    OR toLower(t.source_text) CONTAINS 'bba'
-    OR toLower(t.source_text) CONTAINS 'degree'
-    OR toLower(t.source_text) CONTAINS 'tech and business management'
-)
-RETURN 
-    t.category AS category,
-    t.source_text AS text,
-    t.confidence AS confidence,
-    t.valid_from AS valid_from,
-    t.recorded_at AS recorded_at,
-    t.status AS status
-LIMIT 10
-
-Question:
-What admission process steps were explained?
-
-Cypher:
-MATCH (s:Speaker)-[:SAID_TEMPORAL]->(t:TemporalSignal)-[:FROM_CONVERSATION_TEMPORAL]->(c:Conversation)
-WHERE t.status = 'active'
-AND (
-    t.category = 'process_step'
-    OR toLower(t.source_text) CONTAINS 'admission'
-    OR toLower(t.source_text) CONTAINS 'video essay'
-    OR toLower(t.source_text) CONTAINS 'aptitude test'
-    OR toLower(t.source_text) CONTAINS 'business simulation'
-    OR toLower(t.source_text) CONTAINS 'personal interview'
-)
-RETURN 
-    t.category AS category,
-    t.source_text AS text,
-    t.confidence AS confidence,
-    t.valid_from AS valid_from,
-    t.recorded_at AS recorded_at,
-    t.status AS status
-LIMIT 10
+Generic Search Rules:
+- Do not assume fixed domain.
+- Extract important keywords from the user question.
+- Search those keywords in t.source_text.
+- Also use category when useful.
+- Use OR-based retrieval for explain/why/compare/history/current questions.
 
 Question:
 {question}
@@ -163,14 +113,17 @@ Question:
 Cypher Query:
 """
 
-
 cypher_prompt = PromptTemplate(
     input_variables=["schema", "question"],
     template=CYPHER_GENERATION_TEMPLATE
 )
 
+# =========================
+# QA Prompt
+# =========================
+
 QA_TEMPLATE = """
-You are an assistant that answers from Neo4j query results.
+You are answering using Neo4j bi-temporal query results only.
 
 Question:
 {question}
@@ -179,18 +132,26 @@ Neo4j Results:
 {context}
 
 Rules:
+- Answer only from the given context.
 - Do not show Python list or dictionary format.
-- Write answer in clean bullet points.
-- Mention category, text, valid_from, recorded_at, and status.
+- Write clean bullet points.
+- Mention speaker and conversation_id if available.
+- Mention category, valid_from, valid_to, recorded_at, invalidated_at, and status.
+- Explain the difference between valid time and recorded time when useful.
 - Ignore irrelevant rows.
-- Keep answer clean and readable.
+- If context is empty, say:
+  "No matching information was found in the bi-temporal graph."
 
 Answer format:
 
-- Category: <category>
+- Speaker: <speaker>
+  Conversation: <conversation_id>
+  Category: <category>
   Text: <text>
   Valid From: <valid_from>
+  Valid To: <valid_to>
   Recorded At: <recorded_at>
+  Invalidated At: <invalidated_at>
   Status: <status>
 
 Answer:
@@ -201,54 +162,131 @@ qa_prompt = PromptTemplate(
     template=QA_TEMPLATE
 )
 
+# =========================
+# Chain
+# =========================
+
 chain = GraphCypherQAChain.from_llm(
     llm=llm,
     graph=graph,
-    verbose=True,
+    verbose=False,
     allow_dangerous_requests=True,
     cypher_prompt=cypher_prompt,
-    qa_prompt=qa_prompt
+    qa_prompt=qa_prompt,
+    return_intermediate_steps=True
 )
+
+# =========================
+# Helper Function
+# =========================
+
+def ask_question(question):
+    response = chain.invoke({"query": question})
+
+    print("\n" + "=" * 80)
+    print("QUESTION")
+    print("=" * 80)
+    print(question)
+
+    print("\n" + "=" * 80)
+    print("GENERATED CYPHER")
+    print("=" * 80)
+
+    if "intermediate_steps" in response:
+        for step in response["intermediate_steps"]:
+            if isinstance(step, dict) and "query" in step:
+                print(step["query"])
+
+    print("\n" + "=" * 80)
+    print("RAW DATABASE OUTPUT")
+    print("=" * 80)
+
+    context_found = False
+
+    if "intermediate_steps" in response:
+        for step in response["intermediate_steps"]:
+            if isinstance(step, dict) and "context" in step:
+                context_found = True
+                context = step["context"]
+
+                if len(context) == 0:
+                    print("No matching rows found.")
+                else:
+                    for i, row in enumerate(context, start=1):
+                        print(f"\nRow {i}")
+                        print("-" * 40)
+                        print(row)
+
+    if not context_found:
+        print("No context returned.")
+
+    print("\n" + "=" * 80)
+    print("READABLE LLM ANSWER")
+    print("=" * 80)
+    print(response["result"])
+
+    return response
+
+
+# =========================
+# Best Bi-Temporal Questions
+# =========================
 
 questions = [
 
-    "Show all active scholarship-related information currently valid.",
+    # "Show all currently active information.",
 
-    "Show all information that was recorded today.",
+    # "Show all outdated or invalidated information.",
 
-    "Show all outdated or invalidated information.",
+    # "Show all information with valid time and recorded time.",
 
-    "What scholarship policies were valid on May 25, 2026?",
+    # "Which facts are currently active but were recorded earlier?",
 
-    "Show me the latest fee structure mentioned in the system.",
+    # "Show all historical versions of fee or pricing information.",
 
-    "Show all currently active information related to AI or Data Science courses.",
+    # "Show all active fee or pricing related information.",
 
-    "Show the complete history of scholarship-related changes over time.",
+    # "Show all scholarship related information with valid_from and recorded_at.",
 
-    "What was the scholarship policy before it changed?",
+    # "What information became invalid over time?",
 
-    "Show scholarship information along with valid time and recorded time.",
+    # "Show all signals that have valid_to date.",
 
-    "Which fee information is currently active?",
+    # "Show all signals that were invalidated and explain when they were invalidated.",
 
-    "Show all historical versions of fee structures.",
+    # "Show all active product related information.",
 
-    "Find all AI-related signals that became invalid.",
+    # "Show all admission process related information over time.",
 
-    "What information was active during admission round 2?"
+    # "Show information that was recorded today.",
+
+    # "Show complete temporal history of budget or pricing related signals.",
+
+    # "Which conversation contains the latest active facts?"
 
 ]
 
+# =========================
+# Run Demo Questions
+# =========================
+
 for q in questions:
-    print("\n" + "=" * 80)
-    print("QUESTION:", q)
-    print("=" * 80)
+    ask_question(q)
 
-    response = chain.invoke({"query": q})
+# =========================
+# Interactive Mode
+# =========================
 
-    print("\nANSWER:")
-    print(response["result"])
+while True:
+    user_question = input("\nAsk your own question or type exit: ")
 
+    if user_question.lower() in ["exit", "quit", "stop"]:
+        break
+
+    ask_question(user_question)
+
+# =========================
+# Close Driver
+# =========================
 
 graph._driver.close()

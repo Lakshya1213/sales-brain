@@ -1,5 +1,7 @@
 import os
 import json
+import time
+import re
 from groq import Groq
 from dotenv import load_dotenv
 from docx import Document
@@ -9,106 +11,316 @@ load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
-def safe_json_parse(text):
-    text = text.strip()
-
-    start = text.find("[")
-    end = text.rfind("]")
-
-    if start == -1 or end == -1:
-        raise ValueError("No JSON list found")
-
-    json_text = text[start:end + 1]
-    return json.loads(json_text)
+# ─────────────────────────────────────────────
+# TRANSCRIPT READING
+# ─────────────────────────────────────────────
 
 def read_transcript(file_path):
     doc = Document(file_path)
-
-    full_text = []
-
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if text:
-            full_text.append(text)
-
-    return "\n".join(full_text)
+    lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    return "\n".join(lines)
 
 
-def split_text_into_chunks(text, max_chars=3500):
+def split_into_chunks(text, max_chars=3500):
     lines = text.split("\n")
-
-    chunks = []
-    current_chunk = ""
+    chunks, current = [], ""
 
     for line in lines:
-        if len(current_chunk) + len(line) < max_chars:
-            current_chunk += line + "\n"
+        if len(current) + len(line) + 1 > max_chars and current:
+            chunks.append(current.strip())
+            current = line + "\n"
         else:
-            chunks.append(current_chunk)
-            current_chunk = line + "\n"
+            current += line + "\n"
 
-    if current_chunk:
-        chunks.append(current_chunk)
+    if current.strip():
+        chunks.append(current.strip())
 
     return chunks
 
 
-def extract_signals_from_chunk(chunk_text, conversation_id, chunk_number):
+# ─────────────────────────────────────────────
+# CUSTOMER-CENTRIC CATEGORIES
+# ─────────────────────────────────────────────
+
+CUSTOMER_CATEGORIES = """
+CUSTOMER LIFE CONTEXT
+1. life_goal
+2. life_event
+3. existing_wealth
+4. financial_anxiety
+5. family_dependency
+6. past_experience
+
+CUSTOMER DECISION SIGNALS
+7. buying_signal
+8. hesitation_signal
+9. hard_objection
+10. clarification_ask
+11. commitment
+
+CUSTOMER CONSTRAINTS
+12. budget_ceiling
+13. liquidity_need
+14. time_horizon
+15. risk_tolerance
+16. execution_capacity
+
+CUSTOMER EMOTIONAL STATE
+17. trust_signal
+18. distrust_signal
+19. confusion_signal
+20. rapport_item
+
+DO NOT EXTRACT:
+- Advisor explanations unless customer reacts
+- Greetings
+- Text under 6 words
+- Pure advisor statements
+"""
+
+VALID_CATEGORIES = {
+    "life_goal", "life_event", "existing_wealth", "financial_anxiety",
+    "family_dependency", "past_experience",
+    "buying_signal", "hesitation_signal", "hard_objection",
+    "clarification_ask", "commitment",
+    "budget_ceiling", "liquidity_need", "time_horizon",
+    "risk_tolerance", "execution_capacity",
+    "trust_signal", "distrust_signal", "confusion_signal", "rapport_item"
+}
+
+INVALID_CATEGORY_HEADINGS = {
+    "CUSTOMER LIFE CONTEXT",
+    "CUSTOMER DECISION SIGNALS",
+    "CUSTOMER CONSTRAINTS",
+    "CUSTOMER EMOTIONAL STATE",
+    "CUSTOMER GOALS"
+}
+
+
+PAYLOAD_SCHEMA = """
+{
+  "speaker_role": "customer" | "advisor" | "unknown",
+  "customer_emotion": "anxious" | "confident" | "confused" | "resistant" | "interested" | "neutral",
+  "decision_stage": "exploring" | "evaluating" | "ready_to_commit" | "pulling_back" | "unknown",
+  "life_context_tag": "short phrase",
+  "underlying_need": "1 sentence",
+  "follow_up_question": "question or null",
+  "sentiment": "positive" | "negative" | "neutral",
+  "buying_intent": "high" | "medium" | "low" | "blocking",
+  "summary": "1 sentence"
+}
+"""
+
+
+# ─────────────────────────────────────────────
+# SAFE JSON PARSER
+# ─────────────────────────────────────────────
+
+def _safe_parse(text):
+    text = text.strip()
+    start = text.find("[")
+    end = text.rfind("]")
+
+    if start == -1 or end == -1:
+        raise ValueError(f"No JSON list found. Raw output:\n{text[:300]}")
+
+    return json.loads(text[start:end + 1])
+
+
+
+def infer_names_from_addressing(transcript_text, metadata):
+    """
+    Lightweight fallback:
+    If one speaker directly addresses a name, assign that name to the other speaker.
+    This does not replace LLM output unless speaker_name is missing.
+    """
+
+    lines = transcript_text.split("\n")
+    current_speaker = None
+
+    address_patterns = [
+        r"\b(?:hi|hello|thank you|thanks|alright|okay|ok)\s+([A-Z][a-zA-Z]+)\b",
+        r"\b([A-Z][a-zA-Z]+)\s+(?:ma'?am|madam|sir)\b",
+    ]
+
+    speakers = list(metadata.keys())
+
+    for line in lines:
+        speaker_match = re.match(r"^(Speaker\s+\d+)\s*$", line.strip())
+        if speaker_match:
+            current_speaker = speaker_match.group(1)
+            continue
+
+        if not current_speaker:
+            continue
+
+        for pattern in address_patterns:
+            match = re.search(pattern, line.strip(), flags=re.IGNORECASE)
+            if not match:
+                continue
+
+            name = match.group(1).strip()
+
+            # Avoid common non-name words from transcript noise
+            if name.lower() in {"hello", "okay", "right", "correct", "yes", "no", "good", "morning"}:
+                continue
+
+            # Assign addressed name to the other speaker if there are exactly 2 speakers
+            if len(speakers) == 2:
+                other_speaker = speakers[0] if speakers[1] == current_speaker else speakers[1]
+
+                if metadata.get(other_speaker, {}).get("speaker_name") is None:
+                    metadata[other_speaker]["speaker_name"] = name
+
+    return metadata
+
+
+# ─────────────────────────────────────────────
+# LLM SPEAKER METADATA EXTRACTION
+# No NER. No entity model.
+# ─────────────────────────────────────────────
+
+def extract_speaker_metadata(transcript_text, source_file):
     prompt = f"""
-You are extracting structured commercial signals from a B2C sales call transcript chunk.
+You are analyzing a financial sales call transcript.
 
-Context:
-- This is an outbound retail sales/admission call.
-- The customer is an individual person.
-- Extract only what is actually said or clearly implied.
-- Do NOT guess.
-- Do NOT extract greetings, fillers, small talk, or repeated "okay/hmm/hello".
+Your task:
+Identify speaker roles and speaker names ONLY if clearly available in the transcript.
 
-Allowed categories:
-1. people
-2. products
-3. locations
-4. process_step
-5. objection
-6. pain_point
-7. commitment
-8. next_step
-9. budget_pricing
-10. timeline
-11. authority_decision
-12. competition_status_quo
-13. requirement_constraint
-14. product_intent
-15. risk_cue
-16. intent_signal
-17. rapport_item
+Return ONLY valid JSON list.
 
-Category meanings:
-- people: any person mentioned, such as prospect, counsellor, friend, brother, parent, faculty.
-- products: any program, app, platform, service, course, exam, stock, tool, or financial product mentioned.
-- locations: any city, school, campus, market, exchange, or geographic place.
-- process_step: any step in admission/onboarding/sales process, such as form, KYC, test, video essay, interview, activation.
-- objection: hesitation, doubt, pushback, concern, or resistance.
-- pain_point: personal problem or frustration.
-- commitment: something the customer or rep agrees to do.
-- next_step: concrete future action with owner/due date if available.
-- budget_pricing: fee, scholarship, budget, charges, investment capacity, price sensitivity.
-- timeline: when something will happen or when customer will decide.
-- authority_decision: who makes the decision or whether customer needs to consult someone.
-- competition_status_quo: competitor, alternative option, current way of doing things.
-- requirement_constraint: condition, limitation, eligibility, dependency, or constraint.
-- product_intent: interest, curiosity, like/dislike toward a feature, course, service, return, or process.
-- risk_cue: signal that deal may not close.
-- intent_signal: positive, negative, or neutral buying/admission intent.
-- rapport_item: personal useful detail about the customer.
+Format:
+[
+  {{
+    "speaker_label": "Speaker 1",
+    "speaker_name": "Rahul Sharma",
+    "speaker_role": "customer"
+  }}
+]
 
-Return ONLY a valid JSON list.
-No explanation.
-No markdown.
+Rules:
+- speaker_label must exactly match transcript labels like Speaker 1, Speaker 2, Speaker 3.
+- speaker_role must be one of: customer, advisor, unknown.
+- Detect names from greetings, introductions, and direct addressing.
+- If Speaker A says "Hello Phalguni Ma'am", Phalguni is usually Speaker B's name.
+- If Speaker A says "Thank you Saloni" or "Alright Saloni", Saloni is usually Speaker B's name.
+- If actual name is not clearly present in transcript, use null.
+- Do NOT guess or hallucinate names.
+- Infer customer/advisor role from conversation behavior.
+- Customer usually asks questions, raises doubts, discusses money, risk, goals, family, hesitation.
+- Advisor usually explains product, pricing, process, investment plan, hedging, advisory service.
+- Return [] only if no speaker labels are found.
 
-Each JSON object must have exactly these fields:
+Transcript:
+{transcript_text[:8000]}
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+
+    raw = response.choices[0].message.content.strip()
+
+    try:
+        data = _safe_parse(raw)
+        metadata = {}
+
+        for item in data:
+            speaker_label = item.get("speaker_label")
+
+            if not speaker_label:
+                continue
+
+            metadata[speaker_label] = {
+                "speaker_name": item.get("speaker_name"),
+                "speaker_role": item.get("speaker_role", "unknown"),
+                "source_file": source_file
+            }
+
+        metadata = infer_names_from_addressing(transcript_text, metadata)
+
+        return metadata
+
+    except Exception as e:
+        print(f"Speaker metadata extraction failed: {e}")
+        return {}
+
+
+# ─────────────────────────────────────────────
+# SIGNAL EXTRACTION
+# ─────────────────────────────────────────────
+
+def extract_signals_from_chunk(
+    chunk_text,
+    conversation_id,
+    chunk_number,
+    speaker_metadata,
+    source_file
+):
+    role_note = "\n".join(
+        f"  {speaker}: role={meta.get('speaker_role', 'unknown')}, "
+        f"name={meta.get('speaker_name')}"
+        for speaker, meta in speaker_metadata.items()
+    )
+
+    prompt = f"""
+You are a customer insight analyst reviewing a financial sales call transcript.
+
+Your ONLY job is to understand the CUSTOMER:
+- fears
+- goals
+- constraints
+- emotional state
+- decision readiness
+- concerns
+- objections
+- pricing/advisory fee concerns
+
+You are NOT cataloguing the product pitch.
+
+Speaker metadata:
+{role_note}
+
+Source file:
+{source_file}
+
+GOLDEN RULE:
+Before extracting any signal, ask:
+"Does this tell me something meaningful about the customer's situation,
+psychology, concern, or decision-making?"
+
+If no, skip it.
+
+If the signal comes from advisor's mouth, only extract it if the customer reacted
+to it clearly in the same or immediately next turn.
+
+{CUSTOMER_CATEGORIES}
+
+VERY IMPORTANT CATEGORY RULE:
+category must be ONLY one of these exact values:
+life_goal, life_event, existing_wealth, financial_anxiety, family_dependency, past_experience,
+buying_signal, hesitation_signal, hard_objection, clarification_ask, commitment,
+budget_ceiling, liquidity_need, time_horizon, risk_tolerance, execution_capacity,
+trust_signal, distrust_signal, confusion_signal, rapport_item
+
+Never use group headings like:
+CUSTOMER LIFE CONTEXT, CUSTOMER DECISION SIGNALS, CUSTOMER CONSTRAINTS,
+CUSTOMER EMOTIONAL STATE, CUSTOMER GOALS.
+
+PAYLOAD SCHEMA:
+{PAYLOAD_SCHEMA}
+
+OUTPUT FORMAT:
+Return ONLY valid JSON list. No markdown. No explanation.
+
+Each object must contain:
 - conversation_id
 - speaker
+- speaker_name
+- speaker_role
+- source_file
 - category
 - source_text
 - confidence
@@ -117,79 +329,170 @@ Each JSON object must have exactly these fields:
 - chunk_number
 
 Rules:
-- source_text must be exact text from transcript chunk.
-- confidence must be between 0 and 1.
-- status should be "active".
-- payload must be an object.
-- If unsure, do not extract.
-- Prefer fewer but high-quality signals.
-- Do not create duplicate signals from the same source_text.
-- Keep source_text short and exact.
-
-Payload guidance by category:
-- people: {{"name_or_role": "", "side": "rep-side/customer-side/unknown"}}
-- products: {{"name": "", "type": ""}}
-- locations: {{"place": "", "type": ""}}
-- process_step: {{"step": "", "stage": ""}}
-- objection: {{"objection_type": "", "severity": "low/medium/high", "status": "open/resolved/reopened"}}
-- pain_point: {{"pain_type": "", "customer_agreed": "yes/no/unclear"}}
-- commitment: {{"owner": "", "commitment_type": "", "hardness": "soft/hard", "conditional": "yes/no"}}
-- next_step: {{"owner": "", "action": "", "due_date": "", "dependency": "", "status": "open/done"}}
-- budget_pricing: {{"pricing_type": "", "amount": "", "sensitivity": "low/medium/high/unknown"}}
-- timeline: {{"time_reference": "", "urgency": "low/medium/high"}}
-- authority_decision: {{"decision_maker": "", "needs_consultation": "yes/no/unclear"}}
-- competition_status_quo: {{"alternative": "", "type": "competitor/status_quo"}}
-- requirement_constraint: {{"constraint_type": "", "description": ""}}
-- product_intent: {{"type": "feature/process/program/service", "intent": "curious/like/dislike", "confidence_type": "definitive/hedged/speculative"}}
-- risk_cue: {{"risk_area": "", "severity": "low/medium/high"}}
-- intent_signal: {{"polarity": "positive/negative/neutral", "strength": "weak/moderate/strong"}}
-- rapport_item: {{"detail": "", "usefulness": ""}}
+- source_text = exact words from transcript
+- source_text minimum 6 words
+- Maximum 5 signals per chunk
+- Prefer 2-3 high-confidence signals over weak signals
+- Confidence below 0.6 = do not include
+- For Hindi/English transcript: keep source_text as-is, summary in English
+- status must be "active"
+- source_file must be "{source_file}"
+- If speaker name is unavailable, use null
+- Do not invent customer names
 
 conversation_id: {conversation_id}
 chunk_number: {chunk_number}
 
-Transcript chunk:
+Transcript:
 {chunk_text}
 """
 
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
     )
 
-    result = response.choices[0].message.content.strip()
+    raw = response.choices[0].message.content.strip()
+    return _safe_parse(raw)
 
-    return safe_json_parse(result)
 
-def extract_signals_from_text(transcript_text, conversation_id):
-    chunks = split_text_into_chunks(transcript_text, max_chars=2000)
+# ─────────────────────────────────────────────
+# POST PROCESSING
+# ─────────────────────────────────────────────
+
+def post_process(signals, speaker_metadata, source_file):
+    seen = {}
+    result = []
+
+    for sig in signals:
+        source = sig.get("source_text", "").strip()
+
+        if len(source.split()) < 6:
+            continue
+
+        if sig.get("confidence", 0) < 0.6:
+            continue
+
+        category = sig.get("category")
+
+        if category in INVALID_CATEGORY_HEADINGS:
+            continue
+
+        if category not in VALID_CATEGORIES:
+            continue
+
+        speaker = sig.get("speaker")
+        meta = speaker_metadata.get(speaker, {})
+
+        speaker_name = sig.get("speaker_name") or meta.get("speaker_name")
+        speaker_role = sig.get("speaker_role") or meta.get("speaker_role", "unknown")
+
+        sig["speaker_name"] = speaker_name
+        sig["speaker_role"] = speaker_role
+        sig["source_file"] = sig.get("source_file") or source_file
+
+        payload = sig.setdefault("payload", {})
+        payload["speaker_role"] = payload.get("speaker_role") or speaker_role
+        payload["speaker_name"] = speaker_name
+        payload["source_file"] = sig["source_file"]
+
+        if speaker_role == "advisor":
+            customer_reaction_categories = {
+                "buying_signal",
+                "hesitation_signal",
+                "hard_objection",
+                "clarification_ask",
+                "commitment",
+                "trust_signal",
+                "distrust_signal",
+                "confusion_signal",
+            }
+
+            if sig.get("category") not in customer_reaction_categories:
+                continue
+
+        key = (
+            sig.get("conversation_id"),
+            speaker,
+            source.lower()
+        )
+
+        if key not in seen:
+            seen[key] = sig
+            result.append(sig)
+        else:
+            old = seen[key]
+            if sig.get("confidence", 0) > old.get("confidence", 0):
+                idx = result.index(old)
+                result[idx] = sig
+                seen[key] = sig
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# MAIN EXTRACTION FROM TEXT
+# ─────────────────────────────────────────────
+
+def extract_signals_from_text(transcript_text, conversation_id, source_file):
+    speaker_metadata = extract_speaker_metadata(
+        transcript_text=transcript_text,
+        source_file=source_file
+    )
+
+    chunks = split_into_chunks(transcript_text, max_chars=3500)
 
     all_signals = []
 
-    print(f"Total chunks created: {len(chunks)}")
+    print(f"[{conversation_id}] Source file: {source_file}")
+    print(f"[{conversation_id}] Speaker metadata:")
+    print(json.dumps(speaker_metadata, indent=2, ensure_ascii=False))
+    print(f"[{conversation_id}] {len(chunks)} chunks")
 
-    for i, chunk in enumerate(chunks, start=1):
-        print(f"Extracting chunk {i}/{len(chunks)}")
+    for i, chunk in enumerate(chunks, 1):
+        print(f"  chunk {i}/{len(chunks)} ...", end=" ")
 
         try:
             signals = extract_signals_from_chunk(
                 chunk_text=chunk,
                 conversation_id=conversation_id,
-                chunk_number=i
+                chunk_number=i,
+                speaker_metadata=speaker_metadata,
+                source_file=source_file
             )
+
+            print(f"{len(signals)} signals raw")
 
             all_signals.extend(signals)
 
         except Exception as e:
-            print(f"Chunk {i} failed:", e)
+            print(f"FAILED: {e}")
 
-    return all_signals
+        time.sleep(1)
 
+    final = post_process(
+        signals=all_signals,
+        speaker_metadata=speaker_metadata,
+        source_file=source_file
+    )
+
+    print(f"  → {len(final)} signals after cleanup")
+
+    return final
+
+
+# ─────────────────────────────────────────────
+# MAIN EXTRACTION FROM FILE
+# ─────────────────────────────────────────────
 
 def extract_from_file(file_path, conversation_id):
     transcript_text = read_transcript(file_path)
-    signals = extract_signals_from_text(transcript_text, conversation_id)
-    return signals
+
+    source_file = os.path.basename(file_path)
+
+    return extract_signals_from_text(
+        transcript_text=transcript_text,
+        conversation_id=conversation_id,
+        source_file=source_file
+    )

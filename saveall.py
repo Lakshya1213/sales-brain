@@ -5,9 +5,16 @@ from ingestion.ingest import ingest
 
 
 files = [
-    (r"D:\Transcrpit\sales_brain\transcripts\Finideas_0171_transcript8.docx", "Finideas_0171"),
-    (r"D:\Transcrpit\sales_brain\transcripts\Finideas_1319_transcript4.docx", "Finideas_1319"),
-    (r"D:\Transcrpit\sales_brain\transcripts\Finideas_3060_transcript5.docx", "Finideas_3060"),
+    # (r"D:\Transcrpit\sales_brain\transcripts\Finideas_8508_transcript1 (1).docx","8508_Fin")
+    (r"D:\Transcrpit\sales_brain\transcripts\Finideas_3430_transcript2.docx","3430_Fin")
+    # (r"D:\Transcrpit\sales_brain\transcripts\Finideas_9812_transcript3.docx","9812_Fin")
+    # (r"D:\Transcrpit\sales_brain\transcripts\Finideas_1319_transcript4.docx","1319_Fin")
+    # (r"D:\Transcrpit\sales_brain\transcripts\Finideas_3060_transcript5.docx","3060_Fin"),
+        # (r"D:\Transcrpit\sales_brain\transcripts\Finideas_6101_transcript6.docx","6101_Fin")
+
+        # (r"D:\Transcrpit\sales_brain\transcripts\Finideas_8508_transcript1_newtest.docx","8508_Fin")
+    # (r"D:\Transcrpit\sales_brain\transcripts\Finideas_0171_transcript8.docx", "Finideas_0171"),
+
 ]
 
 
