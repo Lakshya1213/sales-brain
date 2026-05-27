@@ -142,5 +142,59 @@ def close_old_fact_and_insert_new(old_signal_id, new_signal):
     print("Old fact closed and new fact inserted")
 
 
+
+def insert_bitemporal_entity(entity):
+
+    now = datetime.utcnow().isoformat()
+
+    query = """
+    MERGE (c:Conversation {id: $conversation_id})
+    MERGE (sp:Speaker {name: $speaker})
+
+    MERGE (te:TemporalEntity {id: $id})
+
+    SET te.entity_category = $entity_category,
+        te.entity_text = $entity_text,
+        te.normalized_value = $normalized_value,
+        te.context = $context,
+        te.attributes = $attributes,
+        te.confidence = $confidence,
+        te.status = $status,
+        te.source_file = $source_file,
+        te.chunk_number = $chunk_number,
+
+        te.valid_from = $valid_from,
+        te.valid_to = $valid_to,
+
+        te.recorded_at = $recorded_at,
+        te.invalidated_at = $invalidated_at
+
+    MERGE (sp)-[:MENTIONED_TEMPORAL]->(te)
+    MERGE (te)-[:FROM_CONVERSATION_TEMPORAL]->(c)
+    """
+
+    with driver.session() as session:
+        session.run(
+            query,
+            id=entity["id"],
+            conversation_id=entity["conversation_id"],
+            speaker=entity.get("speaker"),
+            entity_category=entity["entity_category"],
+            entity_text=entity["entity_text"],
+            normalized_value=entity.get("normalized_value"),
+            context=entity.get("context"),
+            attributes=str(entity.get("attributes", {})),
+            confidence=entity.get("confidence"),
+            status=entity.get("status", "active"),
+            source_file=entity.get("source_file"),
+            chunk_number=entity.get("chunk_number"),
+            valid_from=now,
+            valid_to=None,
+            recorded_at=now,
+            invalidated_at=None
+        )
+
+    print("Entity inserted into Bi-Temporal Neo4j")
+
 def close_driver():
     driver.close()

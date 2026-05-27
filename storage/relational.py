@@ -36,6 +36,26 @@ def create_tables():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS entities (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        speaker TEXT,
+        speaker_name TEXT,
+        speaker_role TEXT,
+        entity_category TEXT NOT NULL,
+        entity_text TEXT NOT NULL,
+        normalized_value TEXT,
+        context TEXT,
+        attributes JSONB,
+        confidence FLOAT,
+        status TEXT DEFAULT 'active',
+        source_file TEXT,
+        chunk_number INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS audit_log (
         id SERIAL PRIMARY KEY,
         signal_id TEXT,
@@ -51,7 +71,6 @@ def create_tables():
     cur.close()
     conn.close()
     print("PostgreSQL tables created")
-
 
 def generate_signal_id(signal):
     raw = (
@@ -116,6 +135,46 @@ def insert_signal(signal):
 
         conn.commit()
         print("PostgreSQL insert failed:", e)
+
+    finally:
+        cur.close()
+        conn.close()
+        
+def insert_entity(entity):
+    conn = get_pg_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+        INSERT INTO entities
+        (id, conversation_id, speaker, speaker_name, speaker_role,
+         entity_category, entity_text, normalized_value, context,
+         attributes, confidence, status, source_file, chunk_number)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO NOTHING;
+        """, (
+            entity["id"],
+            entity["conversation_id"],
+            entity.get("speaker"),
+            entity.get("speaker_name"),
+            entity.get("speaker_role"),
+            entity["entity_category"],
+            entity["entity_text"],
+            entity.get("normalized_value"),
+            entity.get("context"),
+            json.dumps(entity.get("attributes", {})),
+            entity.get("confidence"),
+            entity.get("status", "active"),
+            entity.get("source_file"),
+            entity.get("chunk_number")
+        ))
+
+        conn.commit()
+        print("Entity inserted into PostgreSQL")
+
+    except Exception as e:
+        conn.rollback()
+        print("PostgreSQL entity insert failed:", e)
 
     finally:
         cur.close()

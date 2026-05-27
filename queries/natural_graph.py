@@ -24,92 +24,119 @@ You are an expert Neo4j Cypher query generator.
 Use only this schema:
 {schema}
 
-Correct graph pattern:
+Graph patterns:
 
+For customer signals:
 MATCH (sp:Speaker)-[:SAID]->(sig:Signal)-[:FROM_CONVERSATION]->(c:Conversation)
 
+For extracted entities:
+MATCH (sp:Speaker)-[:MENTIONED]->(e:Entity)-[:FROM_CONVERSATION]->(c:Conversation)
+
 Nodes:
-- Speaker(name)
-- Signal(category, source_text, confidence, payload, status)
-- Conversation(id)
+
+Signal:
+- category
+- source_text
+- confidence
+- payload
+- status
+- source_file
+- chunk_number
+- speaker_name
+- speaker_role
+
+Entity:
+- entity_category
+- entity_text
+- normalized_value
+- context
+- attributes
+- confidence
+- status
+- source_file
+- chunk_number
+- speaker_name
+- speaker_role
+
+Speaker:
+- label
+- name
+- role
+
+Conversation:
+- id
+- source_file
 
 Rules:
 
-1. Always use this relationship direction:
-(Speaker)-[:SAID]->(Signal)-[:FROM_CONVERSATION]->(Conversation)
+1. If the user asks about customer psychology, fears, goals, hesitation, objections, buying intent, trust, confusion, use Signal.
 
-2. Always search using source_text, category, and payload.
+2. If the user asks about exact facts like people, products, locations, amount, pricing, broker, plan, KYC, timeline, next steps, use Entity.
 
-Use this pattern:
+3. If the question can need both meaning and exact facts, query both Signal and Entity using UNION.
+
+4. Never use regex =~.
+
+5. Never use COUNT unless user explicitly asks:
+- how many
+- count
+- total number
+
+6. Use LIMIT 20 unless user asks for all records.
+
+7. Do NOT invent properties or relationships outside schema.
+
+Signal search pattern:
 
 WHERE toLower(sig.source_text) CONTAINS "keyword"
    OR toLower(sig.category) CONTAINS "keyword"
    OR toLower(toString(sig.payload)) CONTAINS "keyword"
 
-3. Never use regex =~.
+Entity search pattern:
 
-4. Never use COUNT unless user explicitly asks:
-- how many
-- count
-- total number
+WHERE toLower(e.entity_text) CONTAINS "keyword"
+   OR toLower(e.entity_category) CONTAINS "keyword"
+   OR toLower(e.normalized_value) CONTAINS "keyword"
+   OR toLower(e.context) CONTAINS "keyword"
+   OR toLower(toString(e.attributes)) CONTAINS "keyword"
 
-5. Always return:
+Always return same column names.
 
+For Signal return:
 sig.source_text AS source_text,
 sp.name AS speaker,
 sig.category AS category,
 sig.payload AS payload,
-c.id AS conversation_id
+c.id AS conversation_id,
+"signal" AS record_type
 
-6. Use LIMIT 20 unless user asks for all records.
+For Entity return:
+e.context AS source_text,
+sp.name AS speaker,
+e.entity_category AS category,
+e.attributes AS payload,
+c.id AS conversation_id,
+"entity" AS record_type
 
-7. Do NOT assume any specific domain.
-8. Do NOT hardcode company/product names.
-9. Extract important keywords from the user's question.
-10. Use OR between related keywords for broader retrieval.
-11. Do NOT force all keywords using AND unless user explicitly asks strict filtering.
-12. Different information may exist in different Signal rows.
-13. Retrieve broader context first, then let QA summarize.
+Customer-centric mapping:
 
-Customer-centric mapping rules:
+Pricing / charges:
+pricing, price, fee, fees, charge, charges, cost, amount, budget, ticket
 
-If user asks about pricing concern, search:
-pricing, price, fee, fees, charge, charges, cost, amount, expensive, budget, ticket
+Risk:
+risk, loss, downside, protection, guarantee, safety, market crash
 
-If user asks about advisory fee, search:
-advisory, fee, fees, charge, charges
-
-If user asks about minimum ticket size, search:
-minimum, ticket, amount, investment, capital
-
-If user asks about drop-off, search:
-drop, hesitate, hesitation, delay, not interested, later, think, inactive, concern
-
-If user asks about risk concern, search:
-risk, loss, downside, protection, guarantee, guaranteed, safety, safe
-
-If user asks about unresolved query, search:
-clarify, confusion, repeated, question, doubt, unresolved, not clear
-
-If user asks about buying intent, search:
+Buying intent:
 interested, proceed, yes, commit, investment, ready, positive
 
-If user asks about salesperson performance, search:
-resolved, explanation, clarify, objection, answer, response
+Timeline:
+today, tomorrow, next week, month, year, later, follow up, start
 
-For reasoning questions like:
-- why
-- explain
-- compare
-- discuss
-- summarize
-- suitable
-- related to
-- difference between
+Products:
+plan, product, app, platform, broker, demat, SWP, KYC
 
-Use OR-based retrieval.
-
-Never invent properties or relationships outside schema.
+People:
+customer, advisor, RM, research head, founder, friend, family
 
 Question:
 {question}
@@ -127,15 +154,13 @@ You are answering questions using Neo4j query results only.
 
 Rules:
 - Answer ONLY from the provided context.
-- Never hallucinate or invent facts.
-- If rows exist, summarize them naturally.
+- Never hallucinate.
+- If record_type is signal, explain customer meaning/psychology.
+- If record_type is entity, explain exact extracted facts.
 - Mention speaker names when available.
 - Mention conversation IDs when useful.
 - Mention category and payload details when helpful.
-- Mention important numbers, percentages, fees, dates, amounts, or statistics if present.
-- Keep answers concise but informative.
-- Combine related rows into one readable explanation.
-- If multiple speakers discuss the same topic, summarize all perspectives.
+- Keep answer concise and readable.
 - If no rows exist, say:
 "No matching information was found in the graph database."
 
